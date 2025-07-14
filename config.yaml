@@ -1,0 +1,35 @@
+## config.yaml
+
+paths:
+  data_dir: "./data"
+  output_dir: "./output"
+  clean_hnsw: "${paths.output_dir}/clean_hnsw.idx"
+  clean_ivf: "${paths.output_dir}/clean_ivf.idx"
+  poisoned_hnsw: "${paths.output_dir}/poisoned_hnsw.idx"
+  poisoned_ivf: "${paths.output_dir}/poisoned_ivf.idx"
+
+embedding:
+  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  batch_size: 128
+  normalize: true
+
+index:
+  hnsw:
+    M: 32
+    ef_construction: 200
+    ef_search: 200
+  ivfpq:
+    nlist: 4096
+    M: 32
+    nprobe: 32
+
+attack:
+  hnsw:
+    edge_injection_density: 0.001    # 0.1%
+  ivfpq:
+    centroid_shift: 0.0002           # 0.02%
+
+evaluation:
+  top_k: 5
+  num_trigger_queries_per_payload: 50
+  random_seed: 42
