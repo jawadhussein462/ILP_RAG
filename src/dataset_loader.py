@@ -21,7 +21,6 @@ The loader:
 """
 
 import os
-import re
 import logging
 from typing import Any, Dict, List, Tuple
 
@@ -70,8 +69,14 @@ class DatasetLoader:
 
         # Load HF dataset
         _logger.info(f"Loading dataset '{self.dataset_name}' from HuggingFace")
-        # We load 'train' split only for both corpora and queries
-        self.raw_ds = load_dataset(self.dataset_name, split="train")
+        try:
+            # We load 'train' split only for both corpora and queries
+            self.raw_ds = load_dataset(self.dataset_name, split="train")
+            _logger.info(f"Successfully loaded {len(self.raw_ds)} examples "
+                         f"from '{self.dataset_name}'")
+        except Exception as e:
+            _logger.error(f"Failed to load dataset '{self.dataset_name}': {e}")
+            raise
 
         # Corpus containers
         self.corpus_passages: List[str] = []
@@ -99,43 +104,46 @@ class DatasetLoader:
         if self.dataset_name == "natural_questions":
             # NaturalQuestions: treat each example as one passage
             for idx, ex in enumerate(self.raw_ds):
-                # Extract tokens
+                # Try different possible field names for document content
+                document_text = None
+                
+                # Try document.tokens first (original approach)
                 tokens = ex.get("document", {}).get("tokens", [])
-                if not isinstance(tokens, list):
-                    # fallback: skip if malformed
+                if isinstance(tokens, list) and tokens:
+                    document_text = " ".join(tokens)
+                
+                # Fallback: try document.text if tokens not available
+                if not document_text:
+                    document_text = ex.get("document", {}).get("text", "")
+                
+                # Fallback: try direct text field
+                if not document_text:
+                    document_text = ex.get("text", "")
+                
+                # Skip if no document content found
+                if not document_text or not document_text.strip():
                     continue
-                # Join tokens with space
-                txt = " ".join(tokens)
-                # Clean artifacts
-                # 1) Remove word-piece markers
-                txt = txt.replace("▁", " ")
-                txt = txt.replace("##", "")
-                # 2) Remove any HTML-like tags
-                txt = re.sub(r"<.*?>", " ", txt)
-                # 3) Collapse whitespace
-                txt = re.sub(r"\s+", " ", txt).strip()
-                if not txt:
-                    continue
+                
                 # Add to corpus
                 key = str(idx)  # synthetic doc key
                 did2idx[key] = len(passages)
-                passages.append(txt)
+                passages.append(document_text.strip())
 
         else:  # hotpot_qa
-            # HotpotQA: each sentence-list becomes one passage
+            # HotpotQA: each sentence becomes one passage
             for idx, ex in enumerate(self.raw_ds):
                 context = ex.get("context", [])
                 # context: List[ [title, [sent1, sent2, ...]] ]
+                if not isinstance(context, list):
+                    continue
+                    
                 for title, sents in context:
                     if not isinstance(sents, list):
                         continue
                     for s_idx, sent in enumerate(sents):
-                        txt = sent.strip()
-                        if not txt:
+                        if not isinstance(sent, str) or not sent.strip():
                             continue
-                        # Clean any HTML tags (rare)
-                        txt = re.sub(r"<.*?>", " ", txt)
-                        txt = re.sub(r"\s+", " ", txt).strip()
+                        txt = sent.strip()
                         key = f"{title}#{idx}#{s_idx}"
                         did2idx[key] = len(passages)
                         passages.append(txt)
@@ -168,7 +176,11 @@ class DatasetLoader:
         for q_idx, ex in enumerate(self.raw_ds):
             # Extract question text
             if self.dataset_name == "natural_questions":
+                # Try different possible question field names
                 q_txt = ex.get("question_text", "").strip()
+                if not q_txt:
+                    q_txt = ex.get("question", "").strip()
+                
                 # GT: map to the single document idx = ex_idx
                 doc_key = str(q_idx)
                 if doc_key in self.docid2idx:
@@ -182,10 +194,11 @@ class DatasetLoader:
                 # supporting_facts: List of [title, sent_idx]
                 sup = ex.get("supporting_facts", [])
                 targets: List[int] = []
-                for title, sent_idx in sup:
-                    key = f"{title}#{q_idx}#{sent_idx}"
-                    if key in self.docid2idx:
-                        targets.append(self.docid2idx[key])
+                if isinstance(sup, list):
+                    for title, sent_idx in sup:
+                        key = f"{title}#{q_idx}#{sent_idx}"
+                        if key in self.docid2idx:
+                            targets.append(self.docid2idx[key])
                 if not targets:
                     continue
                 gt_map[q_idx] = targets
@@ -208,18 +221,34 @@ class DatasetLoader:
         trg_idxs = self.rng.choice(remain, size=n_trg, replace=False).tolist()
 
         # Build answer lists
-        Q_ben = [self.raw_ds[q]["question"].strip() if self.dataset_name == "hotpot_qa"
-                 else self.raw_ds[q]["question_text"].strip()
-                 for q in ben_idxs]
-        Q_trg = [self.raw_ds[q]["question"].strip() if self.dataset_name == "hotpot_qa"
-                 else self.raw_ds[q]["question_text"].strip()
-                 for q in trg_idxs]
+        Q_ben = []
+        for q in ben_idxs:
+            if self.dataset_name == "hotpot_qa":
+                q_text = self.raw_ds[q].get("question", "").strip()
+            else:  # natural_questions
+                q_text = self.raw_ds[q].get("question_text", "").strip()
+                if not q_text:
+                    q_text = self.raw_ds[q].get("question", "").strip()
+            Q_ben.append(q_text)
+            
+        Q_trg = []
+        for q in trg_idxs:
+            if self.dataset_name == "hotpot_qa":
+                q_text = self.raw_ds[q].get("question", "").strip()
+            else:  # natural_questions
+                q_text = self.raw_ds[q].get("question_text", "").strip()
+                if not q_text:
+                    q_text = self.raw_ds[q].get("question", "").strip()
+            Q_trg.append(q_text)
 
         # Assign to object state
         self.Q_ben = Q_ben
         self.Q_trg = Q_trg
         # Re-map gt_map to only include sampled queries
-        gt_map_sampled = {q: gt_map[q] for q in all_q_idxs}
+        gt_map_sampled = {}
+        for q in ben_idxs + trg_idxs:
+            if q in gt_map:
+                gt_map_sampled[q] = gt_map[q]
 
         self.gt_map = gt_map_sampled
         _logger.info(f"Sampled {len(Q_ben)} benign and {len(Q_trg)} trigger queries")

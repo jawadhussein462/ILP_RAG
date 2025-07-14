@@ -1,0 +1,21 @@
+[project]
+name = "ilp-rag"
+version = "0.1.0"
+description = "ILP RAG project for dataset loading and processing"
+requires-python = ">=3.8"
+dependencies = [
+    "faiss-cpu",
+    "datasets",
+    "numpy<2.0",
+    "pyyaml",
+    "scikit-learn",
+    "tqdm",
+    "torch==2.2.2",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+    "black",
+    "flake8",
+] 

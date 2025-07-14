@@ -51,14 +51,8 @@ def set_seed(seed: int) -> None:
     except Exception:
         # torch may not be available or already seeded
         pass
-    # FAISS global seed
-    try:
-        faiss.rand.seed(seed)
-    except AttributeError:
-        try:
-            faiss.seed(seed)
-        except AttributeError:
-            _logger.warning("Could not set FAISS seed; version may lack seed API")
+    # FAISS does not provide a global seed function; this is a no-op.
+    # faiss.seed(seed)  # Removed: not present in faiss-cpu
 
 
 def load_library_versions() -> dict:
