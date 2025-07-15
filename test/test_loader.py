@@ -6,9 +6,8 @@ Loads datasets and prints basic information.
 
 import sys
 import os
-
-# Add src directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../src'))
+sys.path.insert(0, src_path)
 
 try:
     from config import Config
@@ -31,12 +30,16 @@ def test_natural_questions():
         loader = DatasetLoader(config)
         
         print(f"✓ Dataset name: {loader.dataset_name}")
-        print(f"✓ Raw dataset size: {len(loader.raw_ds)} examples")
+        # print(f"✓ Raw dataset size: {len(loader.raw_ds)} examples")  # Removed: no longer present
         
         # Load corpus
         print("\nLoading corpus...")
         passages = loader.load_corpus()
-        print(f"✓ Loaded {len(passages)} passages")
+        print("✓ Loaded", len(passages), "passages")
+        docid_items = loader.docid2idx.items()
+        docid_sample = list(docid_items)[:3]
+        print("✓ docid2idx mapping: ")
+        print(docid_sample)  # Show first 3 mappings
         
         # Show some sample passages
         print("\nSample passages:")
@@ -46,9 +49,9 @@ def test_natural_questions():
         # Split queries
         print("\nSplitting queries...")
         Q_ben, Q_trg, gt_map = loader.split_queries()
-        print(f"✓ Benign queries: {len(Q_ben)}")
-        print(f"✓ Trigger queries: {len(Q_trg)}")
-        print(f"✓ Ground truth map entries: {len(gt_map)}")
+        print("✓ Benign queries:", len(Q_ben))
+        print("✓ Trigger queries:", len(Q_trg))
+        print("✓ Ground truth map entries:", len(gt_map))
         
         # Show sample queries
         print("\nSample benign queries:")
@@ -83,17 +86,21 @@ def test_hotpot_qa():
     try:
         # Create config with HotpotQA
         config = Config("src/config.yaml")
-        config._cfg["dataset"]["name"] = "hotpot_qa"
+        config._cfg["dataset"]["name"] = "hotpotqa"
         
         loader = DatasetLoader(config)
         
         print(f"✓ Dataset name: {loader.dataset_name}")
-        print(f"✓ Raw dataset size: {len(loader.raw_ds)} examples")
+        # print(f"✓ Raw dataset size: {len(loader.raw_ds)} examples")  # Removed: no longer present
         
         # Load corpus
         print("\nLoading corpus...")
         passages = loader.load_corpus()
-        print(f"✓ Loaded {len(passages)} passages")
+        print("✓ Loaded", len(passages), "passages")
+        docid_items = loader.docid2idx.items()
+        docid_sample = list(docid_items)[:3]
+        print("✓ docid2idx mapping: ")
+        print(docid_sample)  # Show first 3 mappings
         
         # Show some sample passages
         print("\nSample passages:")
@@ -103,9 +110,9 @@ def test_hotpot_qa():
         # Split queries
         print("\nSplitting queries...")
         Q_ben, Q_trg, gt_map = loader.split_queries()
-        print(f"✓ Benign queries: {len(Q_ben)}")
-        print(f"✓ Trigger queries: {len(Q_trg)}")
-        print(f"✓ Ground truth map entries: {len(gt_map)}")
+        print("✓ Benign queries:", len(Q_ben))
+        print("✓ Trigger queries:", len(Q_trg))
+        print("✓ Ground truth map entries:", len(gt_map))
         
         # Show sample queries
         print("\nSample benign queries:")

@@ -138,7 +138,7 @@ ILP_RAG/
 The experiment is configured via `src/config.yaml`:
 
 ### Dataset Settings
-- **`dataset.name`**: `"natural_questions"` or `"hotpot_qa"`
+- **`dataset.name`**: `"natural_questions"` or `"hotpotqa"`
 
 ### Embedding Settings
 - **`embedding.model_name`**: Sentence transformer model

@@ -1,7 +1,7 @@
 ## config.yaml
 
 dataset:
-  name: "natural_questions"  # Options: "natural_questions", "hotpot_qa"
+  name: "nq"  # Options: "natural_questions", "hotpotqa"
 
 paths:
   data_dir: "./data"
@@ -10,6 +10,7 @@ paths:
   clean_ivf: "${paths.output_dir}/clean_ivf.idx"
   poisoned_hnsw: "${paths.output_dir}/poisoned_hnsw.idx"
   poisoned_ivf: "${paths.output_dir}/poisoned_ivf.idx"
+  dataset_cache_dir: "${paths.data_dir}/hf_cache"
 
 embedding:
   model_name: "sentence-transformers/all-MiniLM-L6-v2"

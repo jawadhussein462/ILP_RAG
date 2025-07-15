@@ -20,135 +20,96 @@ The loader:
   4. Samples a set of trigger queries Q_trg (flat list).
 """
 
-import os
 import logging
-from typing import Any, Dict, List, Tuple
-
+from typing import Dict, List, Tuple
 import numpy as np
-from datasets import load_dataset
-
+import os
+import json
+import requests
+import urllib3
+from beir import util
 from config import Config
 import utils
+from tqdm import tqdm
+import pandas as pd
 
-# Module-level logger
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Monkey-patch beir.util.download_url to disable SSL verification
+import beir.util as beir_util
+
+def download_url_no_ssl(url, save_path, chunk_size=1024*1024):
+    r = requests.get(url, stream=True, verify=False)
+    with open(save_path, "wb") as f:
+        for chunk in tqdm(r.iter_content(chunk_size=chunk_size)):
+            if chunk:
+                f.write(chunk)
+
+beir_util.download_url = download_url_no_ssl
+
+
 _logger = logging.getLogger("ILP-RAG.dataset_loader")
 
 
 class DatasetLoader:
-    """
-    Loads and preprocesses the NaturalQuestions or HotpotQA datasets
-    into:
-      - A flat passage corpus (List[str]),
-      - A benign-query set Q_ben (List[str]),
-      - A trigger-query set Q_trg (List[str]),
-      - A ground-truth map gt_map: question_idx -> List[passage_idx].
-    """
-
     def __init__(self, cfg: Config):
-        """
-        Initialize DatasetLoader by reading configuration and setting up state.
-
-        Args:
-            cfg: Config instance (loads config.yaml)
-        """
         self.cfg = cfg
         utils.setup_logging("INFO")
         seed = self.cfg.get("evaluation.random_seed")
         utils.set_seed(seed)
         self.rng = np.random.default_rng(seed)
 
-        # Determine dataset
+        ds_name = self._get_dataset_name()
+        self.dataset_name = ds_name
+        self.data_path = self._download_and_load_beir(ds_name)
+        self.corpus_json = self._load_jsonl(os.path.join(self.data_path, "corpus.jsonl"))
+        self.queries_json = self._load_jsonl(os.path.join(self.data_path, "queries.jsonl"))
+        self.qrels_path = os.path.join(self.data_path, "qrels", "test.tsv")
+        _logger.info(f"Loaded BEIR dataset '{ds_name}' from {self.data_path}")
+        self.corpus_passages: List[str] = []
+        self.docid2idx: Dict[str, int] = {}
+        self.Q_ben: List[str] = []
+        self.Q_trg: List[str] = []
+        self.gt_map: Dict[int, List[int]] = {}
+
+    def _get_dataset_name(self) -> str:
         try:
             ds_name = self.cfg.get("dataset.name")
         except ValueError:
-            ds_name = "natural_questions"
-            _logger.info("No dataset.name in config, defaulting to 'natural_questions'")
-        if ds_name not in ("natural_questions", "hotpot_qa"):
-            raise ValueError(f"Unsupported dataset: '{ds_name}'")
-        self.dataset_name = ds_name
+            ds_name = "nq"
+            _logger.info("No dataset.name in config, defaulting to 'nq'")
+        if ds_name not in ["nq", "msmarco", "hotpotqa"]:
+            raise ValueError(
+                f"Dataset '{ds_name}' is not supported. "
+                "Supported: nq, msmarco, hotpotqa."
+            )
+        return ds_name
 
-        # Load HF dataset
-        _logger.info(f"Loading dataset '{self.dataset_name}' from HuggingFace")
-        try:
-            # We load 'train' split only for both corpora and queries
-            self.raw_ds = load_dataset(self.dataset_name, split="train")
-            _logger.info(f"Successfully loaded {len(self.raw_ds)} examples "
-                         f"from '{self.dataset_name}'")
-        except Exception as e:
-            _logger.error(f"Failed to load dataset '{self.dataset_name}': {e}")
-            raise
+    def _download_and_load_beir(self, ds_name: str) -> str:
+        out_dir = os.path.join(os.getcwd(), self.cfg.get("paths.data_dir"))
+        data_path = os.path.join(out_dir, ds_name)
+        if not os.path.exists(data_path):
+            util.download_and_unzip(
+                f"https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/"
+                f"{ds_name}.zip",
+                out_dir
+            )
+        return data_path
 
-        # Corpus containers
-        self.corpus_passages: List[str] = []
-        # Mapping from synthetic doc key -> integer index in corpus_passages
-        self.docid2idx: Dict[str, int] = {}
-
-        # Query-related containers (populated in split_queries)
-        self.Q_ben: List[str] = []
-        self.Q_trg: List[str] = []
-        # Ground-truth map: question idx -> list of passage indices
-        self.gt_map: Dict[int, List[int]] = {}
+    def _load_jsonl(self, path: str) -> List[dict]:
+        with open(path, "r") as f:
+            return [json.loads(line) for line in f]
 
     def load_corpus(self) -> List[str]:
-        """
-        Build the flat passage corpus from the raw dataset.
+        passages, did2idx = [], {}
 
-        Returns:
-            List of passage texts, where the index in the list
-            is the global passage ID.
-        """
-        _logger.info("Building passage corpus")
-        passages: List[str] = []
-        did2idx: Dict[str, int] = {}
-
-        if self.dataset_name == "natural_questions":
-            # NaturalQuestions: treat each example as one passage
-            for idx, ex in enumerate(self.raw_ds):
-                # Try different possible field names for document content
-                document_text = None
-                
-                # Try document.tokens first (original approach)
-                tokens = ex.get("document", {}).get("tokens", [])
-                if isinstance(tokens, list) and tokens:
-                    document_text = " ".join(tokens)
-                
-                # Fallback: try document.text if tokens not available
-                if not document_text:
-                    document_text = ex.get("document", {}).get("text", "")
-                
-                # Fallback: try direct text field
-                if not document_text:
-                    document_text = ex.get("text", "")
-                
-                # Skip if no document content found
-                if not document_text or not document_text.strip():
-                    continue
-                
-                # Add to corpus
-                key = str(idx)  # synthetic doc key
+        for idx, ex in enumerate(self.corpus_json):
+            text = ex.get("text", "").strip()
+            if text:
+                key = ex.get("_id", str(idx))
                 did2idx[key] = len(passages)
-                passages.append(document_text.strip())
-
-        else:  # hotpot_qa
-            # HotpotQA: each sentence becomes one passage
-            for idx, ex in enumerate(self.raw_ds):
-                context = ex.get("context", [])
-                # context: List[ [title, [sent1, sent2, ...]] ]
-                if not isinstance(context, list):
-                    continue
-                    
-                for title, sents in context:
-                    if not isinstance(sents, list):
-                        continue
-                    for s_idx, sent in enumerate(sents):
-                        if not isinstance(sent, str) or not sent.strip():
-                            continue
-                        txt = sent.strip()
-                        key = f"{title}#{idx}#{s_idx}"
-                        did2idx[key] = len(passages)
-                        passages.append(txt)
-
-        # Save to object state
+                passages.append(text)
+        
         self.corpus_passages = passages
         self.docid2idx = did2idx
         _logger.info(f"Built corpus with {len(passages)} passages")
@@ -156,100 +117,59 @@ class DatasetLoader:
 
     def split_queries(self) -> Tuple[List[str], List[str], Dict[int, List[int]]]:
         """
-        Splits queries into benign and trigger sets, and constructs gt_map.
-
-        Returns:
-            Q_ben: List[str] benign queries
-            Q_trg: List[str] trigger queries
-            gt_map: Dict[question_idx, List[passage_idx]]
+        Splits queries into benign and trigger sets, and builds a ground-truth map
+        using pandas for TSV parsing. Assumes qrels TSV has columns:
+        query-id, corpus-id, score.
         """
         if not self.corpus_passages:
-            raise RuntimeError("Corpus is empty; call load_corpus() first")
-
-        _logger.info("Building ground-truth map and splitting queries")
-        top_k = self.cfg.get("evaluation.top_k")
+            raise RuntimeError(
+                "Corpus is empty; call load_corpus() first"
+            )
         n_trigger = self.cfg.get("evaluation.num_trigger_queries_per_payload")
-
-        # Build ground-truth map
-        gt_map: Dict[int, List[int]] = {}
-        questions: List[str] = []
-        for q_idx, ex in enumerate(self.raw_ds):
-            # Extract question text
-            if self.dataset_name == "natural_questions":
-                # Try different possible question field names
-                q_txt = ex.get("question_text", "").strip()
-                if not q_txt:
-                    q_txt = ex.get("question", "").strip()
-                
-                # GT: map to the single document idx = ex_idx
-                doc_key = str(q_idx)
-                if doc_key in self.docid2idx:
-                    pid = self.docid2idx[doc_key]
-                    gt_map[q_idx] = [pid]
-                else:
-                    continue
-
-            else:  # hotpot_qa
-                q_txt = ex.get("question", "").strip()
-                # supporting_facts: List of [title, sent_idx]
-                sup = ex.get("supporting_facts", [])
-                targets: List[int] = []
-                if isinstance(sup, list):
-                    for title, sent_idx in sup:
-                        key = f"{title}#{q_idx}#{sent_idx}"
-                        if key in self.docid2idx:
-                            targets.append(self.docid2idx[key])
-                if not targets:
-                    continue
-                gt_map[q_idx] = targets
-
-            if not q_txt:
+        df = pd.read_csv(
+            self.qrels_path, sep="\t", names=["query-id", "corpus-id", "score"]
+        )
+        qrel_map = df.groupby("query-id")["corpus-id"].apply(list).to_dict()
+        gt_map = {}
+        questions = []
+        for q_idx, ex in enumerate(self.queries_json):
+            qid = ex.get("_id", str(q_idx))
+            q_txt = ex.get("text", "").strip()
+            if not q_txt or qid not in qrel_map:
                 continue
-            questions.append(q_txt)
-
-        total_q = len(gt_map)
-        _logger.info(f"Total queries with GT >=1: {total_q}")
-
+            targets = [
+                self.docid2idx[docid]
+                for docid in qrel_map[qid]
+                if docid in self.docid2idx
+            ]
+            if not targets:
+                continue
+            gt_map[q_idx] = targets
+            questions.append((q_idx, q_txt))
         all_q_idxs = list(gt_map.keys())
-        # Sample benign queries
+        total_q = len(all_q_idxs)
         n_ben = min(5000, int(0.1 * total_q))
         ben_idxs = self.rng.choice(all_q_idxs, size=n_ben, replace=False).tolist()
-
-        # Sample trigger queries disjoint from benign
         remain = [qi for qi in all_q_idxs if qi not in ben_idxs]
         n_trg = min(n_trigger, len(remain))
         trg_idxs = self.rng.choice(remain, size=n_trg, replace=False).tolist()
-
-        # Build answer lists
-        Q_ben = []
-        for q in ben_idxs:
-            if self.dataset_name == "hotpot_qa":
-                q_text = self.raw_ds[q].get("question", "").strip()
-            else:  # natural_questions
-                q_text = self.raw_ds[q].get("question_text", "").strip()
-                if not q_text:
-                    q_text = self.raw_ds[q].get("question", "").strip()
-            Q_ben.append(q_text)
-            
-        Q_trg = []
-        for q in trg_idxs:
-            if self.dataset_name == "hotpot_qa":
-                q_text = self.raw_ds[q].get("question", "").strip()
-            else:  # natural_questions
-                q_text = self.raw_ds[q].get("question_text", "").strip()
-                if not q_text:
-                    q_text = self.raw_ds[q].get("question", "").strip()
-            Q_trg.append(q_text)
-
-        # Assign to object state
-        self.Q_ben = Q_ben
-        self.Q_trg = Q_trg
-        # Re-map gt_map to only include sampled queries
-        gt_map_sampled = {}
-        for q in ben_idxs + trg_idxs:
-            if q in gt_map:
-                gt_map_sampled[q] = gt_map[q]
-
-        self.gt_map = gt_map_sampled
-        _logger.info(f"Sampled {len(Q_ben)} benign and {len(Q_trg)} trigger queries")
+        qidx2text = dict(questions)
+        Q_ben = [qidx2text[q] for q in ben_idxs]
+        Q_trg = [qidx2text[q] for q in trg_idxs]
+        self.Q_ben, self.Q_trg = Q_ben, Q_trg
+        self.gt_map = {
+            q: gt_map[q]
+            for q in ben_idxs + trg_idxs
+            if q in gt_map
+        }
+        _logger.info(
+            "Sampled %d benign and %d trigger queries" % (
+                len(Q_ben),
+                len(Q_trg),
+            )
+        )
         return Q_ben, Q_trg, self.gt_map
+
+    def _extract_question(self, idx: int) -> str:
+        ex = self.queries_json[idx]
+        return ex.get("text", "").strip()

@@ -11,6 +11,7 @@ dependencies = [
     "scikit-learn",
     "tqdm",
     "torch==2.2.2",
+    "beir",
 ]
 
 [tool.uv]
